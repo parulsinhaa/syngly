@@ -1469,6 +1469,7 @@ let isPlaying = false;
 let currentScreen = 'splash';
 let roomRef = null;
 let dbInitialized = false;
+let pendingPlayback = null; // stores playback state received before player was ready
 
 // ===================================
 // FIREBASE INIT
@@ -1617,16 +1618,34 @@ function loadMyRooms() {
     list.innerHTML = '<div class="empty-state"><div class="empty-state-icon">♩</div><div class="empty-state-text">No rooms yet.<br>Create one to start listening.</div></div>';
     return;
   }
+  // Render immediately with loading state, then verify each room exists
   list.innerHTML = myRooms.map(r => `
-    <div class="room-item" onclick="rejoinRoom('${r.code}', '${r.name}', ${r.isAdmin})">
+    <div class="room-item" id="room-item-${r.code}" onclick="rejoinRoom('${r.code}', '${r.name}', ${r.isAdmin})">
       <div class="room-avatar">${r.name[0].toUpperCase()}</div>
       <div class="room-info">
         <div class="room-name">${r.name}</div>
         <div class="room-meta">Code: ${r.code} · ${r.isAdmin ? 'Host' : 'Guest'}</div>
       </div>
-      <div class="room-live"><div class="live-dot"></div>Open</div>
+      <div class="room-live" id="room-status-${r.code}" style="opacity:0.3"><div class="live-dot"></div>…</div>
     </div>
   `).join('');
+
+  // Check each room in Firebase
+  const db = getDB();
+  if (!db) return;
+  myRooms.forEach(r => {
+    db.ref('rooms/' + r.code).once('value').then(snap => {
+      const el = document.getElementById('room-status-' + r.code);
+      if (!el) return;
+      if (snap.exists()) {
+        el.style.opacity = '1';
+        el.innerHTML = '<div class="live-dot"></div>Open';
+      } else {
+        el.style.opacity = '0.4';
+        el.innerHTML = '—';
+      }
+    }).catch(() => {});
+  });
 }
 
 function createRoom() {
@@ -1752,6 +1771,8 @@ function rejoinRoom(code, name, admin) {
 function openRoomScreen(code, name, admin) {
   currentRoom = { code, name };
   isAdmin = admin;
+  currentVideoId = null; // reset so incoming playback always triggers load
+  pendingPlayback = null;
 
   document.getElementById('room-display-name').textContent = name;
   document.getElementById('room-display-meta').textContent = 'Code: ' + code + (admin ? ' · Host' : ' · Guest');
@@ -1770,6 +1791,9 @@ function openRoomScreen(code, name, admin) {
   } else if (!ytPlayer && !ytReady) {
     // Will be init'd by onYouTubeIframeAPIReady when API loads
   }
+
+  // Clear chat on room open (prevent duplicates on re-enter)
+  document.getElementById('chat-messages').innerHTML = '';
 
   // Firebase room listeners
   setupRoomListeners(code);
@@ -1843,35 +1867,41 @@ function setupRoomListeners(code) {
     const pb = snap.val();
     if (!pb.videoId) return;
 
+    // Player not ready yet — store for later
+    if (!ytPlayer || !ytReady) {
+      pendingPlayback = pb;
+      return;
+    }
+
     // If video changed, load it
     if (pb.videoId !== currentVideoId) {
       currentVideoId = pb.videoId;
       currentVideoTitle = pb.title || '';
       currentVideoChannel = pb.channel || '';
-      if (ytPlayer && ytReady) {
-        ytPlayer.loadVideoById(pb.videoId);
-        updateNowPlaying(pb.title, pb.channel, pb.videoId);
-        showPlayerControls();
-        showMiniPlayer(pb.title, '');
-      }
+      const elapsed = (Date.now() - pb.updatedAt) / 1000;
+      const startPos = Math.max(0, pb.position + (pb.state === 'playing' ? elapsed : 0));
+      ytPlayer.loadVideoById(pb.videoId, startPos);
+      updateNowPlaying(pb.title, pb.channel, pb.videoId);
+      showPlayerControls();
+      showMiniPlayer(pb.title, '');
+      if (pb.state === 'playing') ytPlayer.playVideo();
+      return;
     }
 
     // Sync playback state (allow 2s drift)
-    if (ytPlayer && ytReady) {
-      const serverTime = pb.updatedAt;
-      const elapsed = (Date.now() - serverTime) / 1000;
-      const expectedPos = pb.position + (pb.state === 'playing' ? elapsed : 0);
-      const currentPos = ytPlayer.getCurrentTime?.() || 0;
+    const serverTime = pb.updatedAt;
+    const elapsed = (Date.now() - serverTime) / 1000;
+    const expectedPos = pb.position + (pb.state === 'playing' ? elapsed : 0);
+    const currentPos = ytPlayer.getCurrentTime?.() || 0;
 
-      if (Math.abs(currentPos - expectedPos) > 2) {
-        ytPlayer.seekTo(Math.max(0, expectedPos), true);
-      }
+    if (Math.abs(currentPos - expectedPos) > 2) {
+      ytPlayer.seekTo(Math.max(0, expectedPos), true);
+    }
 
-      if (pb.state === 'playing' && ytPlayer.getPlayerState?.() !== 1) {
-        ytPlayer.playVideo();
-      } else if (pb.state === 'paused' && ytPlayer.getPlayerState?.() === 1) {
-        ytPlayer.pauseVideo();
-      }
+    if (pb.state === 'playing' && ytPlayer.getPlayerState?.() !== 1) {
+      ytPlayer.playVideo();
+    } else if (pb.state === 'paused' && ytPlayer.getPlayerState?.() === 1) {
+      ytPlayer.pauseVideo();
     }
   });
   playbackUnsub = () => pbRef.off('value');
@@ -1885,14 +1915,24 @@ function setupRoomListeners(code) {
   });
   membersUnsub = () => mRef.off('value');
 
-  // Chat
+  // Chat — only listen to NEW messages from this point forward
   if (chatUnsub) chatUnsub();
-  const cRef = db.ref(base + '/chat').limitToLast(100);
+  const joinedAt = Date.now();
+  const cRef = db.ref(base + '/chat').orderByChild('ts').startAt(joinedAt).limitToLast(100);
   cRef.on('child_added', snap => {
     const msg = snap.val();
     if (msg) appendChatMsg(msg);
   });
   chatUnsub = () => cRef.off('child_added');
+
+  // Load last 30 historical messages once (without re-triggering on new ones)
+  db.ref(base + '/chat').orderByChild('ts').limitToLast(30).once('value', snap => {
+    const msgs = snap.val();
+    if (!msgs) return;
+    const container = document.getElementById('chat-messages');
+    container.innerHTML = ''; // clear placeholder
+    Object.values(msgs).sort((a,b) => a.ts - b.ts).forEach(m => appendChatMsg(m));
+  });
 }
 
 function announcePresence(code) {
@@ -1971,6 +2011,21 @@ function initYTPlayer() {
 
 function onPlayerReady(e) {
   e.target.setVolume(80);
+  // Apply any playback that arrived before player was ready
+  if (pendingPlayback) {
+    const pb = pendingPlayback;
+    pendingPlayback = null;
+    currentVideoId = pb.videoId;
+    currentVideoTitle = pb.title || '';
+    currentVideoChannel = pb.channel || '';
+    const elapsed = (Date.now() - pb.updatedAt) / 1000;
+    const startPos = Math.max(0, pb.position + (pb.state === 'playing' ? elapsed : 0));
+    ytPlayer.loadVideoById(pb.videoId, startPos);
+    updateNowPlaying(pb.title, pb.channel, pb.videoId);
+    showPlayerControls();
+    showMiniPlayer(pb.title, '');
+    if (pb.state === 'playing') ytPlayer.playVideo();
+  }
 }
 
 function onPlayerStateChange(e) {
@@ -1982,6 +2037,12 @@ function onPlayerStateChange(e) {
     startProgressInterval();
     showMiniPlayer();
     showPlayerControls();
+
+    // Warn Chrome users about background play restriction (once per session)
+    if (!sessionStorage.getItem('syngly_bg_warned')) {
+      sessionStorage.setItem('syngly_bg_warned', '1');
+      setTimeout(() => toast('Tip: Keep this tab open for playback to continue'), 2000);
+    }
   } else if (state === 2 || state === 0) {
     isPlaying = false;
     updatePlayIcon(false);
