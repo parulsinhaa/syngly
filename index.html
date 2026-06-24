@@ -1317,25 +1317,15 @@ html, body {
     </div>
     <div class="scroll-area">
       <div class="settings-body">
-        <div class="settings-section-title">API Keys</div>
-        <p style="font-size:12px;color:var(--gray-400);line-height:1.6;margin-bottom:16px;">
-          Keys are stored locally on your device only. Get YouTube Data API v3 from Google Cloud Console.
-        </p>
-        <div class="input-wrap">
-          <label class="input-label">YouTube Data API Key</label>
-          <input class="settings-api-input" id="settings-yt-key" placeholder="AIza…" type="password" autocomplete="off">
+        <div class="settings-section-title">About</div>
+        <div class="settings-item">
+          <span class="settings-item-label">Firebase</span>
+          <span class="settings-item-value" style="color:#4ade80;">● Connected</span>
         </div>
-
-        <div class="settings-section-title">Firebase Config</div>
-        <p style="font-size:12px;color:var(--gray-400);line-height:1.6;margin-bottom:16px;">
-          Paste your Firebase config JSON for real-time room sync.
-        </p>
-        <div class="input-wrap">
-          <label class="input-label">Firebase Config JSON</label>
-          <textarea class="settings-api-input" id="settings-firebase-config" placeholder='{"apiKey":"...","databaseURL":"...","projectId":"...","appId":"..."}' rows="6" style="resize:vertical;"></textarea>
+        <div class="settings-item">
+          <span class="settings-item-label">YouTube API</span>
+          <span class="settings-item-value" style="color:#4ade80;">● Active</span>
         </div>
-
-        <button class="btn btn-primary settings-save-btn" onclick="saveSettings()">Save & Apply</button>
 
         <div class="settings-section-title">Account</div>
         <div class="settings-item">
@@ -1440,11 +1430,19 @@ html, body {
 
 <script>
 // ===================================
-// CONFIG — PASTE YOUR KEYS HERE
-// OR ADD VIA SETTINGS IN THE APP
+// CONFIG — HARDCODED CREDENTIALS
 // ===================================
-let YT_API_KEY = localStorage.getItem('syngly_yt_key') || '';
-let FIREBASE_CONFIG = null;
+let YT_API_KEY = localStorage.getItem('syngly_yt_key') || 'AIzaSyBjoehzmHTUxwhu1ZvEcePyYiP6sWv0yQ0';
+let FIREBASE_CONFIG = {
+  apiKey: "AIzaSyBjoehzmHTUxwhu1ZvEcePyYiP6sWv0yQ0",
+  authDomain: "syngly-1a11d.firebaseapp.com",
+  databaseURL: "https://syngly-1a11d-default-rtdb.firebaseio.com",
+  projectId: "syngly-1a11d",
+  storageBucket: "syngly-1a11d.firebasestorage.app",
+  messagingSenderId: "728882339283",
+  appId: "1:728882339283:web:7cb9628dc6849b688a6326",
+  measurementId: "G-M8TS3FH9LD"
+};
 try {
   const saved = localStorage.getItem('syngly_firebase_config');
   if (saved) FIREBASE_CONFIG = JSON.parse(saved);
@@ -1535,39 +1533,13 @@ function goBack() {
 }
 
 function showSettings() {
-  document.getElementById('settings-yt-key').value = localStorage.getItem('syngly_yt_key') || '';
   document.getElementById('settings-name-display').textContent = currentUser.name || '—';
   document.getElementById('settings-name-input').value = '';
-  try {
-    const saved = localStorage.getItem('syngly_firebase_config');
-    if (saved) document.getElementById('settings-firebase-config').value = JSON.stringify(JSON.parse(saved), null, 2);
-  } catch(e) {}
   showScreen('settings');
 }
 
 function saveSettings() {
-  const ytKey = document.getElementById('settings-yt-key').value.trim();
-  const fbRaw = document.getElementById('settings-firebase-config').value.trim();
-
-  if (ytKey) {
-    YT_API_KEY = ytKey;
-    localStorage.setItem('syngly_yt_key', ytKey);
-  }
-
-  if (fbRaw) {
-    try {
-      FIREBASE_CONFIG = JSON.parse(fbRaw);
-      localStorage.setItem('syngly_firebase_config', fbRaw);
-      initFirebase();
-      toast('Settings saved!');
-    } catch(e) {
-      toast('Invalid Firebase JSON');
-      return;
-    }
-  } else {
-    toast('Settings saved!');
-  }
-  checkConfigBanner();
+  toast('Settings saved!');
   goBack();
 }
 
@@ -1593,8 +1565,6 @@ function splashEnter() {
   currentUser.name = name;
   localStorage.setItem('syngly_username', name);
   document.getElementById('home-greeting-name').textContent = name + '.';
-  initFirebase();
-  checkConfigBanner();
   showScreen('home');
   loadMyRooms();
 }
@@ -1604,15 +1574,10 @@ document.getElementById('splash-name').addEventListener('keydown', e => {
 });
 
 // ===================================
-// CONFIG BANNER
+// CONFIG BANNER — hidden, keys hardcoded
 // ===================================
 function checkConfigBanner() {
-  const banner = document.getElementById('config-banner');
-  if (!YT_API_KEY || !FIREBASE_CONFIG) {
-    banner.classList.add('visible');
-  } else {
-    banner.classList.remove('visible');
-  }
+  document.getElementById('config-banner').classList.remove('visible');
 }
 
 // ===================================
@@ -1779,9 +1744,11 @@ function openRoomScreen(code, name, admin) {
   switchTab('search');
   clearSearchResults();
 
-  // Init YT player if not done
+  // Init YT player if not done yet (fallback)
   if (!ytPlayer && ytReady) {
     initYTPlayer();
+  } else if (!ytPlayer && !ytReady) {
+    // Will be init'd by onYouTubeIframeAPIReady when API loads
   }
 
   // Firebase room listeners
@@ -1864,6 +1831,8 @@ function setupRoomListeners(code) {
       if (ytPlayer && ytReady) {
         ytPlayer.loadVideoById(pb.videoId);
         updateNowPlaying(pb.title, pb.channel, pb.videoId);
+        showPlayerControls();
+        showMiniPlayer(pb.title, '');
       }
     }
 
@@ -1955,7 +1924,8 @@ function renderMembersLocal() {
 // ===================================
 function onYouTubeIframeAPIReady() {
   ytReady = true;
-  if (currentRoom) initYTPlayer();
+  // Always init player eagerly so it's ready when a room is joined
+  initYTPlayer();
 }
 
 function initYTPlayer() {
@@ -2215,7 +2185,7 @@ function updateNowPlaying(title, channel, videoId) {
 function showMiniPlayer(title, thumb) {
   const mp = document.getElementById('mini-player');
   if (title) document.getElementById('mini-title').textContent = title;
-  if (currentRoom) document.getElementById('mini-room').textContent = currentRoom.name;
+  if (currentRoom) document.getElementById('mini-room').textContent = '🎵 ' + currentRoom.name + ' · tap to return';
   mp.classList.add('visible');
 }
 
@@ -2226,11 +2196,16 @@ function hideMiniPlayer() {
 function minimizeRoom() {
   showScreen('home');
   loadMyRooms();
+  // Keep mini player visible so user can tap to return
+  if (currentRoom && currentVideoId) {
+    showMiniPlayer(currentVideoTitle, '');
+  }
 }
 
 function returnToRoom() {
   if (currentRoom) {
     showScreen('room');
+    hideMiniPlayer();
   }
 }
 
@@ -2334,17 +2309,15 @@ function toast(msg) {
 // INIT
 // ===================================
 (function init() {
+  // Auto-init Firebase since credentials are hardcoded
+  initFirebase();
+
   if (currentUser.name) {
-    // Auto-enter if name exists
     document.getElementById('splash-name').value = currentUser.name;
     document.getElementById('home-greeting-name').textContent = currentUser.name + '.';
   }
 
-  // Check if already initialized Firebase
-  if (FIREBASE_CONFIG) initFirebase();
   checkConfigBanner();
-
-  // Show splash
   showScreen('splash');
   document.getElementById('bottom-nav').style.display = 'none';
 })();
