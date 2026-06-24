@@ -1198,6 +1198,7 @@ html, body {
       <div class="room-topbar-info">
         <div class="room-topbar-name" id="room-display-name">Room</div>
         <div class="room-topbar-meta" id="room-display-meta">Code: ——</div>
+      <div class="room-topbar-meta" id="room-member-count" style="color:var(--white);font-weight:600;"></div>
       </div>
       <div class="room-topbar-actions">
         <button class="icon-btn" onclick="shareRoomCode()" title="Share code">
@@ -1470,6 +1471,8 @@ let currentScreen = 'splash';
 let roomRef = null;
 let dbInitialized = false;
 let pendingPlayback = null; // stores playback state received before player was ready
+let pendingSeekAfterLoad = null; // seek position to apply once video finishes loading
+let isSyncing = false; // prevent re-broadcast loop while applying sync
 
 // ===================================
 // FIREBASE INIT
@@ -1873,29 +1876,34 @@ function setupRoomListeners(code) {
       return;
     }
 
-    // If video changed, load it
+    // Calculate expected position accounting for network delay
+    const elapsed = Math.max(0, (Date.now() - pb.updatedAt) / 1000);
+    const expectedPos = pb.position + (pb.state === 'playing' ? elapsed : 0);
+
     if (pb.videoId !== currentVideoId) {
+      // New video — load it and seek after it buffers
       currentVideoId = pb.videoId;
       currentVideoTitle = pb.title || '';
       currentVideoChannel = pb.channel || '';
-      const elapsed = (Date.now() - pb.updatedAt) / 1000;
-      const startPos = Math.max(0, pb.position + (pb.state === 'playing' ? elapsed : 0));
-      ytPlayer.loadVideoById(pb.videoId, startPos);
+      pendingSeekAfterLoad = { pos: expectedPos, state: pb.state };
+      isSyncing = true;
+      ytPlayer.loadVideoById(pb.videoId);
       updateNowPlaying(pb.title, pb.channel, pb.videoId);
       showPlayerControls();
       showMiniPlayer(pb.title, '');
-      if (pb.state === 'playing') ytPlayer.playVideo();
       return;
     }
 
-    // Sync playback state (allow 2s drift)
-    const serverTime = pb.updatedAt;
-    const elapsed = (Date.now() - serverTime) / 1000;
-    const expectedPos = pb.position + (pb.state === 'playing' ? elapsed : 0);
-    const currentPos = ytPlayer.getCurrentTime?.() || 0;
+    // Same video — just sync position & state
+    // Don't react to our own recent broadcasts (within 1.5s)
+    const ageMs = Date.now() - pb.updatedAt;
+    if (pb.updatedBy === currentUser.id && ageMs < 1500) return;
 
+    const currentPos = ytPlayer.getCurrentTime?.() || 0;
     if (Math.abs(currentPos - expectedPos) > 2) {
+      isSyncing = true;
       ytPlayer.seekTo(Math.max(0, expectedPos), true);
+      setTimeout(() => { isSyncing = false; }, 1000);
     }
 
     if (pb.state === 'playing' && ytPlayer.getPlayerState?.() !== 1) {
@@ -1942,24 +1950,44 @@ function announcePresence(code) {
     return;
   }
   const ref = db.ref('rooms/' + code + '/members/' + currentUser.id);
-  ref.set({ name: currentUser.name, uid: currentUser.id, isAdmin, joinedAt: Date.now() });
+  const memberData = {
+    name: currentUser.name || 'Anonymous',
+    uid: currentUser.id,
+    isAdmin: isAdmin,
+    joinedAt: Date.now()
+  };
+  ref.set(memberData).catch(err => console.error('Presence write failed:', err));
   ref.onDisconnect().remove();
 }
 
 function renderMembers(data, code) {
   const list = document.getElementById('members-list');
   list.innerHTML = '';
-  Object.values(data).forEach(m => {
+  const members = Object.values(data || {});
+
+  // Update Members tab label + topbar count
+  document.querySelectorAll('.room-tab').forEach(t => {
+    if (t.textContent.startsWith('Members')) t.textContent = 'Members' + (members.length ? ' (' + members.length + ')' : '');
+  });
+  const countEl = document.getElementById('room-member-count');
+  if (countEl) countEl.textContent = members.length ? members.length + ' online' : '';
+
+  if (members.length === 0) {
+    list.innerHTML = '<div style="padding:24px 14px;text-align:center;font-size:13px;color:var(--gray-600);">Waiting for members…</div>';
+    return;
+  }
+
+  members.forEach(m => {
     const el = document.createElement('div');
     el.className = 'member-item';
-    el.innerHTML = `
-      <div class="member-avatar">${(m.name||'?')[0].toUpperCase()}</div>
-      <div class="member-info">
-        <div class="member-name">${m.name||'Unknown'}</div>
-        <div class="member-role">${m.isAdmin ? 'Host' : 'Listener'}</div>
-      </div>
-      ${m.isAdmin ? '<div class="member-badge">Host</div>' : ''}
-    `;
+    const isMe = m.uid === currentUser.id;
+    el.innerHTML =
+      '<div class="member-avatar">' + (m.name||'?')[0].toUpperCase() + '</div>' +
+      '<div class="member-info">' +
+        '<div class="member-name">' + escHtml(m.name||'Unknown') + (isMe ? ' <span style="color:var(--gray-400);font-size:11px;">(you)</span>' : '') + '</div>' +
+        '<div class="member-role">' + (m.isAdmin ? 'Host' : 'Listener') + '</div>' +
+      '</div>' +
+      (m.isAdmin ? '<div class="member-badge">Host</div>' : '');
     list.appendChild(el);
   });
 }
@@ -2030,13 +2058,26 @@ function onPlayerReady(e) {
 
 function onPlayerStateChange(e) {
   const state = e.data;
-  // 1 = playing, 2 = paused, 0 = ended
+  // YT states: -1=unstarted, 0=ended, 1=playing, 2=paused, 3=buffering, 5=cued
+
+  // When video is cued/buffering after a sync-load, seek to correct position
+  if ((state === 5 || state === 3) && pendingSeekAfterLoad) {
+    const { pos, state: pbState } = pendingSeekAfterLoad;
+    pendingSeekAfterLoad = null;
+    ytPlayer.seekTo(Math.max(0, pos), true);
+    if (pbState === 'playing') ytPlayer.playVideo();
+    else ytPlayer.pauseVideo();
+    setTimeout(() => { isSyncing = false; }, 1500);
+    return;
+  }
+
   if (state === 1) {
     isPlaying = true;
     updatePlayIcon(true);
     startProgressInterval();
     showMiniPlayer();
     showPlayerControls();
+    isSyncing = false;
 
     // Warn Chrome users about background play restriction (once per session)
     if (!sessionStorage.getItem('syngly_bg_warned')) {
@@ -2047,6 +2088,7 @@ function onPlayerStateChange(e) {
     isPlaying = false;
     updatePlayIcon(false);
     stopProgressInterval();
+    isSyncing = false;
   }
 }
 
@@ -2137,7 +2179,8 @@ function broadcastPlayback(state, position) {
     videoId: currentVideoId,
     title: currentVideoTitle,
     channel: currentVideoChannel,
-    updatedAt: Date.now()
+    updatedAt: Date.now(),
+    updatedBy: currentUser.id
   });
 }
 
