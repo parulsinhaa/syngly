@@ -1436,7 +1436,7 @@ let YT_API_KEY = localStorage.getItem('syngly_yt_key') || 'AIzaSyBjoehzmHTUxwhu1
 let FIREBASE_CONFIG = {
   apiKey: "AIzaSyBjoehzmHTUxwhu1ZvEcePyYiP6sWv0yQ0",
   authDomain: "syngly-1a11d.firebaseapp.com",
-  databaseURL: "https://syngly-1a11d-default-rtdb.firebaseio.com",
+  databaseURL: "https://syngly-1a11d-default-rtdb.asia-southeast1.firebasedatabase.app",
   projectId: "syngly-1a11d",
   storageBucket: "syngly-1a11d.firebasestorage.app",
   messagingSenderId: "728882339283",
@@ -1680,24 +1680,44 @@ function joinRoom() {
   const code = document.getElementById('join-code-input').value.trim().toUpperCase();
   if (code.length < 4) { toast('Enter a valid code'); return; }
 
+  toast('Joining room…');
+  closeModal('modal-join');
+
   const db = getDB();
   if (db) {
-    db.ref('rooms/' + code).once('value').then(snap => {
-      if (!snap.exists()) {
-        toast('Room not found');
-        return;
+    // Try to find room in Firebase, but enter regardless after timeout
+    let entered = false;
+    const timeout = setTimeout(() => {
+      if (!entered) {
+        entered = true;
+        const room = { name: 'Room ' + code, code, isAdmin: false };
+        myRooms = myRooms.filter(r => r.code !== code);
+        myRooms.unshift(room);
+        localStorage.setItem('syngly_my_rooms', JSON.stringify(myRooms));
+        openRoomScreen(code, room.name, false);
+        loadMyRooms();
       }
-      const data = snap.val();
-      const name = data.name || 'Unnamed Room';
+    }, 3000);
+
+    db.ref('rooms/' + code).once('value').then(snap => {
+      clearTimeout(timeout);
+      if (entered) return;
+      entered = true;
+      let name = 'Room ' + code;
+      if (snap.exists()) {
+        const data = snap.val();
+        name = data.name || name;
+      }
       const room = { name, code, isAdmin: false };
       myRooms = myRooms.filter(r => r.code !== code);
       myRooms.unshift(room);
       localStorage.setItem('syngly_my_rooms', JSON.stringify(myRooms));
-      closeModal('modal-join');
       openRoomScreen(code, name, false);
       loadMyRooms();
     }).catch(() => {
-      // Firebase not configured — try locally
+      clearTimeout(timeout);
+      if (entered) return;
+      entered = true;
       fallbackJoin(code);
     });
   } else {
